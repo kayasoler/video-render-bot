@@ -25,9 +25,14 @@ jobs:
           pip3 install --no-cache-dir edge-tts requests
 
       - name: Write payload
-        run: |
-          echo '${{ toJson(github.event.client_payload) }}' > payload.json
-          cat payload.json
+  run: |
+    jq -n \
+      --arg chat_id "${{ github.event.client_payload.chat_id }}" \
+      --arg text "${{ github.event.client_payload.text }}" \
+      '{chat_id:$chat_id, text:$text}' > payload.json
+
+    cat payload.json
+
 
       - name: Render & send to Telegram
         env:
