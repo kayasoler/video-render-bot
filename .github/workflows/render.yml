@@ -26,13 +26,10 @@ jobs:
           pip3 install --no-cache-dir edge-tts requests
 
       - name: Write payload
-        env:
-          CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          TEXT: ${{ github.event.client_payload.text }}
         run: |
           jq -n \
-            --arg chat_id "$CHAT_ID" \
-            --arg text "$TEXT" \
+            --arg chat_id "${{ github.event.client_payload.chat_id }}" \
+            --arg text "${{ github.event.client_payload.text }}" \
             '{chat_id:$chat_id, text:$text}' > payload.json
 
           cat payload.json
