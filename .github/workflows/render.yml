@@ -4,6 +4,18 @@ on:
   repository_dispatch:
     types: [render]
 
+  # "Run workflow" butonu için (Actions ekranında görünür)
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: "Telegram chat id"
+        required: true
+        default: "111111111"
+      text:
+        description: "Prompt / hikaye metni"
+        required: true
+        default: "Kapadokya'da geçen kısa bir hikaye"
+
 permissions:
   contents: read
 
@@ -26,12 +38,17 @@ jobs:
           pip3 install --no-cache-dir edge-tts requests
 
       - name: Write payload
+        shell: bash
+        env:
+          CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+          TEXT: ${{ github.event.client_payload.text || github.event.inputs.text }}
         run: |
           jq -n \
-            --arg chat_id "${{ github.event.client_payload.chat_id }}" \
-            --arg text "${{ github.event.client_payload.text }}" \
+            --arg chat_id "$CHAT_ID" \
+            --arg text "$TEXT" \
             '{chat_id:$chat_id, text:$text}' > payload.json
 
+          echo "payload.json:"
           cat payload.json
 
       - name: Render & send to Telegram
@@ -39,4 +56,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python3 render.py payload.json
+          python3 ren
