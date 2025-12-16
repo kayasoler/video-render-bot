@@ -11,6 +11,7 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,18 +26,16 @@ jobs:
           pip3 install --no-cache-dir edge-tts requests
 
       - name: Write payload
-  env:
-    CHAT_ID: ${{ github.event.client_payload.chat_id }}
-    TEXT: ${{ github.event.client_payload.text }}
-  run: |
-    jq -n \
-      --arg chat_id "$CHAT_ID" \
-      --arg text "$TEXT" \
-      '{chat_id:$chat_id, text:$text}' > payload.json
+        env:
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          TEXT: ${{ github.event.client_payload.text }}
+        run: |
+          jq -n \
+            --arg chat_id "$CHAT_ID" \
+            --arg text "$TEXT" \
+            '{chat_id:$chat_id, text:$text}' > payload.json
 
-    cat payload.json
-
-
+          cat payload.json
 
       - name: Render & send to Telegram
         env:
