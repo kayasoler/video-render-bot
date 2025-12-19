@@ -178,15 +178,25 @@ def concat_segments(files: list[str], out_mp4: str):
 def send_telegram(chat_id: str, video_path: str):
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     url = f"https://api.telegram.org/bot{token}/sendVideo"
+
     with open(video_path, "rb") as f:
         r = requests.post(
             url,
-            data={"chat_id": chat_id},
-            files={"video": f},
+            data={
+                "chat_id": chat_id,
+                "supports_streaming": "true",
+            },
+            files={
+                "video": (os.path.basename(video_path), f, "video/mp4")
+            },
             timeout=600
         )
+
+    print("Telegram status:", r.status_code, flush=True)
+    print("Telegram response:", r.text[:2000], flush=True)
+
     r.raise_for_status()
-    print("Telegram OK:", r.text[:300], flush=True)
+
 
 
 # --------------------------
