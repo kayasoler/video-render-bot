@@ -43,7 +43,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # İstersen değiştirebilirsin:
-          GEMINI_MODEL: gemini-2.0-flash
+          GEMINI_MODEL: gemini-2.5-flash
         run: |
           python3 render.py payload.json
 
