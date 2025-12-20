@@ -25,7 +25,7 @@ jobs:
         run: |
           pip3 install --no-cache-dir edge-tts requests
 
-      - name: Write payload
+           - name: Write payload
         env:
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           TEXT: ${{ github.event.client_payload.text }}
@@ -36,18 +36,20 @@ jobs:
           jq -n \
             --arg chat_id "$CHAT_ID" \
             --arg text "$TEXT" \
-            --arg style "$STYLE" \
-            --arg voice "$VOICE" \
-            --arg scenes "$SCENES" \
+            --arg style "${STYLE:-cinematic}" \
+            --arg voice "${VOICE:-tr-TR-AhmetNeural}" \
+            --arg scenes "${SCENES:-6}" \
             '{
               chat_id: $chat_id,
               text: $text,
-              style: ($style // ""),
-              scenes: ($scenes // ""),
-              voice: ($voice // "")
+              style: $style,
+              scenes: $scenes,
+              voice: $voice
             }' > payload.json
 
           cat payload.json
+
+        
 
       - name: Render & send to Telegram
         env:
