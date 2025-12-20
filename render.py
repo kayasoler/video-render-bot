@@ -174,6 +174,9 @@ def main():
     prompt = str(payload["text"])
 
     style = str(payload.get("style") or "cinematic").strip()
+    style_key = style.lower()
+    style_prompt = STYLE_PRESETS.get(style_key, style)
+
     voice = str(payload.get("voice") or "tr-TR-AhmetNeural").strip()
 
     scenes_raw = payload.get("scenes")
@@ -183,7 +186,7 @@ def main():
         scenes_count = 6
     scenes_count = max(1, min(12, scenes_count))
 
-    scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style)
+    scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style_prompt)
     print(f"[Scenes] count={len(scenes)} style={style} voice={voice}")
 
     segments = []
