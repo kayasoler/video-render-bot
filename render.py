@@ -10,12 +10,6 @@ import uuid
 import requests
 
 POLLINATIONS = "https://image.pollinations.ai/prompt/"
-STYLE_PRESETS = {
-    "cinematic": "cinematic, ultra realistic, dramatic lighting, film still, shallow depth of field, 35mm",
-    "documentary": "documentary photo, natural light, realistic, candid, photojournalism, sharp focus",
-    "anime": "anime style, studio ghibli inspired, vibrant colors, clean line art, soft shading",
-}
-
 
 
 def sh(cmd: list[str]):
@@ -34,6 +28,7 @@ def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: 
     """
     429 gelirse exponential backoff ile tekrar dener.
     """
+    resp = None
     for attempt in range(max_retries):
         resp = requests.post(url, json=json_body, timeout=timeout)
 
@@ -50,8 +45,9 @@ def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: 
         print(f"[Retry] 429 Rate limit. Sleep {sleep_s:.1f}s (attempt {attempt+1}/{max_retries})")
         time.sleep(sleep_s)
 
-    resp.raise_for_status()  # en son da hata fırlatsın
-    return resp
+    if resp is not None:
+        resp.raise_for_status()
+    raise RuntimeError("post_with_retry failed without response")
 
 
 def gemini_scenes(prompt: str, scenes_count: int, style: str):
@@ -115,7 +111,12 @@ def tts_to_mp3(text: str, out_mp3: str, voice: str):
     sh(["edge-tts", "--voice", voice, "--text", text, "--write-media", out_mp3])
 
 
-def make_segment(img: str, mp3: str, out_mp4: str):
+def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
+    """
+    Pollinations genelde kare görsel döndürür.
+    Seçilen oranı dolduracak şekilde scale+crop ile hedef çözünürlüğe getirir.
+    """
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30"
     sh(
         [
             "ffmpeg",
@@ -128,7 +129,7 @@ def make_segment(img: str, mp3: str, out_mp4: str):
             mp3,
             "-shortest",
             "-vf",
-            "scale=720:-2,fps=30",
+            vf,
             "-c:v",
             "libx264",
             "-preset",
@@ -160,8 +161,7 @@ def send_telegram(chat_id: str, video_path: str, caption: str = ""):
 
     data = {"chat_id": chat_id}
     if caption:
-        # Telegram caption max 1024 karakter
-        data["caption"] = caption[:1024]
+        data["caption"] = caption[:1024]  # Telegram caption limiti
 
     with open(video_path, "rb") as f:
         r = requests.post(url, data=data, files={"video": f}, timeout=300)
@@ -180,10 +180,18 @@ def main():
     prompt = str(payload["text"])
 
     style = str(payload.get("style") or "cinematic").strip()
-    style_key = style.lower()
-    style_prompt = STYLE_PRESETS.get(style_key, style)
-
     voice = str(payload.get("voice") or "tr-TR-AhmetNeural").strip()
+
+    ratio = str(payload.get("ratio") or "1x1").strip().lower()   # 1x1 | 9x16 | 16x9
+    caption = str(payload.get("caption") or "").strip()
+
+    # Hedef çözünürlükler
+    if ratio == "9x16":
+        w, h = 720, 1280
+    elif ratio == "16x9":
+        w, h = 1280, 720
+    else:
+        w, h = 720, 720
 
     scenes_raw = payload.get("scenes")
     try:
@@ -192,8 +200,8 @@ def main():
         scenes_count = 6
     scenes_count = max(1, min(12, scenes_count))
 
-    scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style_prompt)
-    print(f"[Scenes] count={len(scenes)} style={style} voice={voice}")
+    scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style)
+    print(f"[Scenes] count={len(scenes)} style={style} voice={voice} ratio={ratio}")
 
     segments = []
     for i, sc in enumerate(scenes, start=1):
@@ -208,12 +216,12 @@ def main():
         dl(img_url, img)
 
         tts_to_mp3(nar, mp3, voice=voice)
-        make_segment(img, mp3, mp4)
+        make_segment(img, mp3, mp4, w=w, h=h)
         segments.append(mp4)
 
     out = "final.mp4"
     concat_segments(segments, out)
-    send_telegram(chat_id, out)
+    send_telegram(chat_id, out, caption=caption)
 
 
 if __name__ == "__main__":
