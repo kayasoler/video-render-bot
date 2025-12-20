@@ -10,6 +10,12 @@ import uuid
 import requests
 
 POLLINATIONS = "https://image.pollinations.ai/prompt/"
+STYLE_PRESETS = {
+    "cinematic": "cinematic, ultra realistic, dramatic lighting, film still, shallow depth of field, 35mm",
+    "documentary": "documentary photo, natural light, realistic, candid, photojournalism, sharp focus",
+    "anime": "anime style, studio ghibli inspired, vibrant colors, clean line art, soft shading",
+}
+
 
 
 def sh(cmd: list[str]):
