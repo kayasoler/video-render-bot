@@ -63,7 +63,7 @@ def gemini_scenes(prompt: str, scenes_count: int, style: str):
             )
         return scenes
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
 
     system = (
         f"Aşağıdaki kullanıcı isteğinden {scenes_count} sahnelik kısa bir video planı üret.\n"
