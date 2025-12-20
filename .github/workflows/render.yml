@@ -25,31 +25,36 @@ jobs:
         run: |
           pip3 install --no-cache-dir edge-tts requests
 
-           - name: Write payload
+      - name: Write payload
         env:
-          CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          TEXT: ${{ github.event.client_payload.text }}
-          STYLE: ${{ github.event.client_payload.style }}
-          SCENES: ${{ github.event.client_payload.scenes }}
-          VOICE: ${{ github.event.client_payload.voice }}
+          CHAT_ID:  ${{ github.event.client_payload.chat_id }}
+          TEXT:     ${{ github.event.client_payload.text }}
+          STYLE:    ${{ github.event.client_payload.style }}
+          SCENES:   ${{ github.event.client_payload.scenes }}
+          VOICE:    ${{ github.event.client_payload.voice }}
+          RATIO:    ${{ github.event.client_payload.ratio }}
+          CAPTION:  ${{ github.event.client_payload.caption }}
         run: |
           jq -n \
             --arg chat_id "$CHAT_ID" \
             --arg text "$TEXT" \
-            --arg style "${STYLE:-cinematic}" \
-            --arg voice "${VOICE:-tr-TR-AhmetNeural}" \
-            --arg scenes "${SCENES:-6}" \
+            --arg style "$STYLE" \
+            --arg voice "$VOICE" \
+            --arg scenes "$SCENES" \
+            --arg ratio "$RATIO" \
+            --arg caption "$CAPTION" \
             '{
               chat_id: $chat_id,
               text: $text,
-              style: $style,
-              scenes: $scenes,
-              voice: $voice
+              style: ($style // ""),
+              scenes: ($scenes // ""),
+              voice: ($voice // ""),
+              ratio: ($ratio // ""),
+              caption: ($caption // "")
             }' > payload.json
 
+          echo "=== payload.json ==="
           cat payload.json
-
-        
 
       - name: Render & send to Telegram
         env:
