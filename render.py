@@ -28,7 +28,6 @@ def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: 
     """
     429 gelirse exponential backoff ile tekrar dener.
     """
-    resp = None
     for attempt in range(max_retries):
         resp = requests.post(url, json=json_body, timeout=timeout)
 
@@ -45,9 +44,8 @@ def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: 
         print(f"[Retry] 429 Rate limit. Sleep {sleep_s:.1f}s (attempt {attempt+1}/{max_retries})")
         time.sleep(sleep_s)
 
-    if resp is not None:
-        resp.raise_for_status()
-    raise RuntimeError("post_with_retry failed without response")
+    resp.raise_for_status()
+    return resp
 
 
 def gemini_scenes(prompt: str, scenes_count: int, style: str):
@@ -85,7 +83,6 @@ def gemini_scenes(prompt: str, scenes_count: int, style: str):
     resp = post_with_retry(url, json_body=body, timeout=120, max_retries=6)
     txt = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-    # Model bazen ```json blokları ekleyebilir
     txt = txt.strip()
     if txt.startswith("```"):
         txt = txt.replace("```json", "").replace("```", "").strip()
@@ -93,7 +90,6 @@ def gemini_scenes(prompt: str, scenes_count: int, style: str):
     data = json.loads(txt)
     scenes = data["scenes"]
 
-    # Güvenlik: adet tutmazsa kırp/doldur
     if len(scenes) > scenes_count:
         scenes = scenes[:scenes_count]
     while len(scenes) < scenes_count:
@@ -111,10 +107,28 @@ def tts_to_mp3(text: str, out_mp3: str, voice: str):
     sh(["edge-tts", "--voice", voice, "--text", text, "--write-media", out_mp3])
 
 
+def parse_ratio(ratio: str):
+    """
+    ratio: '1x1' | '9x16' | '16x9'
+    Çıkış çözünürlüğü:
+      - 1x1  -> 720x720
+      - 9x16 -> 720x1280
+      - 16x9 -> 1280x720
+    """
+    ratio = (ratio or "1x1").strip().lower()
+    if ratio in ("1:1", "1x1", "square"):
+        return 720, 720, "1x1"
+    if ratio in ("9:16", "9x16", "vertical", "portrait"):
+        return 720, 1280, "9x16"
+    if ratio in ("16:9", "16x9", "horizontal", "landscape"):
+        return 1280, 720, "16x9"
+    # default
+    return 720, 720, "1x1"
+
+
 def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
     """
-    Pollinations genelde kare görsel döndürür.
-    Seçilen oranı dolduracak şekilde scale+crop ile hedef çözünürlüğe getirir.
+    Görseli hedef oranı dolduracak şekilde scale+crop yapar.
     """
     vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30"
     sh(
@@ -136,6 +150,8 @@ def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
             "veryfast",
             "-crf",
             "30",
+            "-pix_fmt",
+            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -147,12 +163,43 @@ def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
     )
 
 
-def concat_segments(files: list[str], out_mp4: str):
+def concat_segments(files: list[str], out_mp4: str, w: int, h: int):
+    """
+    Önce concat demuxer listesi oluşturur, sonra TEK DOSYADA yeniden encode eder.
+    Böylece 'Non-monotonic DTS' gibi audio timestamp sorunları büyük ölçüde biter.
+    """
     lst = "concat_" + uuid.uuid4().hex + ".txt"
     with open(lst, "w", encoding="utf-8") as f:
         for p in files:
             f.write(f"file '{p}'\n")
-    sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_mp4])
+
+    sh(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            lst,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            out_mp4,
+        ]
+    )
 
 
 def send_telegram(chat_id: str, video_path: str, caption: str = ""):
@@ -160,8 +207,10 @@ def send_telegram(chat_id: str, video_path: str, caption: str = ""):
     url = f"https://api.telegram.org/bot{token}/sendVideo"
 
     data = {"chat_id": chat_id}
+    caption = (caption or "").strip()
     if caption:
-        data["caption"] = caption[:1024]  # Telegram caption limiti
+        # Telegram caption max 1024; güvenli kırp
+        data["caption"] = caption[:1024]
 
     with open(video_path, "rb") as f:
         r = requests.post(url, data=data, files={"video": f}, timeout=300)
@@ -182,17 +231,6 @@ def main():
     style = str(payload.get("style") or "cinematic").strip()
     voice = str(payload.get("voice") or "tr-TR-AhmetNeural").strip()
 
-    ratio = str(payload.get("ratio") or "1x1").strip().lower()   # 1x1 | 9x16 | 16x9
-    caption = str(payload.get("caption") or "").strip()
-
-    # Hedef çözünürlükler
-    if ratio == "9x16":
-        w, h = 720, 1280
-    elif ratio == "16x9":
-        w, h = 1280, 720
-    else:
-        w, h = 720, 720
-
     scenes_raw = payload.get("scenes")
     try:
         scenes_count = int(scenes_raw) if str(scenes_raw).strip() else 6
@@ -200,8 +238,13 @@ def main():
         scenes_count = 6
     scenes_count = max(1, min(12, scenes_count))
 
+    ratio = str(payload.get("ratio") or "1x1").strip()
+    w, h, ratio_norm = parse_ratio(ratio)
+
+    caption = str(payload.get("caption") or "").strip()
+
     scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style)
-    print(f"[Scenes] count={len(scenes)} style={style} voice={voice} ratio={ratio}")
+    print(f"[Scenes] count={len(scenes)} style={style} voice={voice} ratio={ratio_norm} size={w}x{h}")
 
     segments = []
     for i, sc in enumerate(scenes, start=1):
@@ -212,7 +255,11 @@ def main():
         mp3 = f"scene_{i}.mp3"
         mp4 = f"seg_{i}.mp4"
 
-        img_url = POLLINATIONS + urllib.parse.quote(ip, safe="")
+        # Oranı ipucu olarak prompt'a eklemek istersen (isteğe bağlı)
+        # ip2 = f"{ip} -- aspect ratio {ratio_norm}"
+        ip2 = ip
+
+        img_url = POLLINATIONS + urllib.parse.quote(ip2, safe="")
         dl(img_url, img)
 
         tts_to_mp3(nar, mp3, voice=voice)
@@ -220,7 +267,7 @@ def main():
         segments.append(mp4)
 
     out = "final.mp4"
-    concat_segments(segments, out)
+    concat_segments(segments, out, w=w, h=h)
     send_telegram(chat_id, out, caption=caption)
 
 
