@@ -6,226 +6,184 @@ import sys
 import time
 import urllib.parse
 import uuid
+
 import requests
 
 POLLINATIONS = "https://image.pollinations.ai/prompt/"
-VOICE = os.getenv("TTS_VOICE", "tr-TR-AhmetNeural")
 
-# --------------------------
-# Helpers
-# --------------------------
+
 def sh(cmd: list[str]):
-    print("RUN:", " ".join(cmd), flush=True)
+    print("RUN:", " ".join(cmd))
     subprocess.check_call(cmd)
 
+
 def dl(url: str, path: str):
-    r = requests.get(url, timeout=180)
+    r = requests.get(url, timeout=120)
     r.raise_for_status()
     with open(path, "wb") as f:
         f.write(r.content)
 
-def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: int = 8):
+
+def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: int = 6):
     """
-    429 gelirse exponential backoff + jitter ile bekler.
-    Denemeler biterse None döner (job fail etmesin, fallback çalışsın).
+    429 gelirse exponential backoff ile tekrar dener.
     """
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.post(url, json=json_body, timeout=timeout)
-        except requests.RequestException as e:
-            # network/timeout vs.
-            if attempt == max_retries:
-                print(f"[Retry] Network error, giving up: {e}", flush=True)
-                return None
-            sleep_s = min(60, (2 ** (attempt - 1)) + random.uniform(0, 1.5))
-            print(f"[Retry] Network error. Sleep {sleep_s:.1f}s (attempt {attempt}/{max_retries})", flush=True)
-            time.sleep(sleep_s)
-            continue
+    for attempt in range(max_retries):
+        resp = requests.post(url, json=json_body, timeout=timeout)
 
-        # Rate limit
-        if resp.status_code == 429:
-            if attempt == max_retries:
-                print("[Retry] 429 Rate limit. Max retries reached -> fallback.", flush=True)
-                return None
-            retry_after = resp.headers.get("Retry-After")
-            if retry_after and retry_after.isdigit():
-                sleep_s = int(retry_after)
-            else:
-                sleep_s = min(60, (2 ** (attempt - 1)) + random.uniform(0, 1.5))
-            print(f"[Retry] 429 Rate limit. Sleep {sleep_s:.1f}s (attempt {attempt}/{max_retries})", flush=True)
-            time.sleep(sleep_s)
-            continue
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
 
-        # Other errors
-        if resp.status_code >= 400:
-            # Bazı 5xx durumlarında retry mantıklı
-            if resp.status_code >= 500 and attempt < max_retries:
-                sleep_s = min(30, (2 ** (attempt - 1)) + random.uniform(0, 1.5))
-                print(f"[Retry] HTTP {resp.status_code}. Sleep {sleep_s:.1f}s (attempt {attempt}/{max_retries})", flush=True)
-                time.sleep(sleep_s)
-                continue
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            sleep_s = float(retry_after)
+        else:
+            sleep_s = min(60.0, (2 ** attempt) + random.uniform(0, 1.5))
 
-            print(f"[HTTP ERROR] {resp.status_code} -> {resp.text[:500]}", flush=True)
-            return None
+        print(f"[Retry] 429 Rate limit. Sleep {sleep_s:.1f}s (attempt {attempt+1}/{max_retries})")
+        time.sleep(sleep_s)
 
-        return resp
-
-    return None
+    resp.raise_for_status()  # en son da hata fırlatsın
+    return resp
 
 
-# --------------------------
-# Scene generation
-# --------------------------
-def fallback_scenes(prompt: str):
-    """
-    Gemini yoksa / 429 ise 6 sahnelik basit plan üret.
-    """
-    base = prompt.strip()
-    if not base:
-        base = "Kısa, duygusal bir Türkçe hikaye"
-
-    # 6 sahne, her biri 6 sn
-    return [
-        {"image_prompt": f"{base}, sinematik geniş açı, 16:9, yüksek detay", "narration": f"{base} başlıyor.", "duration": 6},
-        {"image_prompt": f"{base}, karakter yakın plan, dramatik ışık, 16:9", "narration": "Kahramanımız bir kararın eşiğine gelir.", "duration": 6},
-        {"image_prompt": f"{base}, çevre detayı, sıcak tonlar, 16:9", "narration": "Yolculuk, küçük işaretlerle şekillenir.", "duration": 6},
-        {"image_prompt": f"{base}, gerilimli an, sinematik, 16:9", "narration": "Beklenmedik bir engel ortaya çıkar.", "duration": 6},
-        {"image_prompt": f"{base}, umut veren sahne, gün batımı, 16:9", "narration": "Cesaret, her şeyi değiştiren ana dönüşür.", "duration": 6},
-        {"image_prompt": f"{base}, final sahnesi, huzurlu atmosfer, 16:9", "narration": "Ve hikaye, akılda kalan bir notayla biter.", "duration": 6},
-    ]
-
-def gemini_scenes(prompt: str):
+def gemini_scenes(prompt: str, scenes_count: int, style: str):
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        print("[Gemini] GEMINI_API_KEY yok -> fallback", flush=True)
-        return fallback_scenes(prompt)
+        # Key yoksa fallback: aynı prompttan sahneler üret
+        scenes = []
+        for i in range(scenes_count):
+            scenes.append(
+                {
+                    "image_prompt": f"{style} style. {prompt}. Scene {i+1}/{scenes_count}.",
+                    "narration": prompt,
+                    "duration": 6,
+                }
+            )
+        return scenes
 
-    # Model adı istersen env ile değiştir:
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     system = (
-        "Aşağıdaki kullanıcı isteğinden 6 sahnelik kısa bir video planı üret.\n"
+        f"Aşağıdaki kullanıcı isteğinden {scenes_count} sahnelik kısa bir video planı üret.\n"
+        f"Genel görsel stil: {style}\n"
         "SADECE şu JSON formatında dön (başka hiçbir şey yazma):\n"
         '{"scenes":[{"image_prompt":"...","narration":"...","duration":6}]}\n'
-        "Türkçe yaz. image_prompt görsel üretim için net ve sahneye uygun olsun.\n"
-        "duration her sahne için 6 olsun.\n"
+        "Türkçe yaz. image_prompt görsel üretim için net ve betimleyici olsun.\n"
+        "Her sahne için duration 4-8 saniye arası olabilir."
     )
 
     body = {
         "contents": [
-            {"role": "user", "parts": [{"text": system + "\nKULLANICI:\n" + prompt}]}
+            {"role": "user", "parts": [{"text": system + "\n\nKULLANICI:\n" + prompt}]}
         ]
     }
 
-    resp = post_with_retry(url, json_body=body, timeout=120, max_retries=8)
-    if resp is None:
-        return fallback_scenes(prompt)
+    resp = post_with_retry(url, json_body=body, timeout=120, max_retries=6)
+    txt = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-    try:
-        data = resp.json()
-        txt = data["candidates"][0]["content"]["parts"][0]["text"]
-        txt = txt.strip()
-        if txt.startswith("```"):
-            # ```json ... ``` temizle
-            txt = txt.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(txt)
-        scenes = parsed.get("scenes")
-        if not scenes or not isinstance(scenes, list):
-            print("[Gemini] JSON format beklenenden farklı -> fallback", flush=True)
-            return fallback_scenes(prompt)
-        return scenes
-    except Exception as e:
-        print(f"[Gemini] Parse error -> fallback: {e}", flush=True)
-        return fallback_scenes(prompt)
+    # Model bazen ```json blokları ekleyebilir
+    txt = txt.strip()
+    if txt.startswith("```"):
+        txt = txt.replace("```json", "").replace("```", "").strip()
+
+    data = json.loads(txt)
+    scenes = data["scenes"]
+
+    # Güvenlik: adet tutmazsa kırp/doldur
+    if len(scenes) > scenes_count:
+        scenes = scenes[:scenes_count]
+    while len(scenes) < scenes_count:
+        scenes.append(
+            {
+                "image_prompt": f"{style} style. {prompt}. Extra scene.",
+                "narration": prompt,
+                "duration": 6,
+            }
+        )
+    return scenes
 
 
-# --------------------------
-# Media pipeline
-# --------------------------
-def tts_to_mp3(text: str, out_mp3: str):
-    sh(["edge-tts", "--voice", VOICE, "--text", text, "--write-media", out_mp3])
+def tts_to_mp3(text: str, out_mp3: str, voice: str):
+    sh(["edge-tts", "--voice", voice, "--text", text, "--write-media", out_mp3])
+
 
 def make_segment(img: str, mp3: str, out_mp4: str):
-    sh([
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", img,
-        "-i", mp3,
-        "-shortest",
-        "-vf", "scale=720:-2,fps=30",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-        out_mp4
-    ])
+    sh(
+        [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            img,
+            "-i",
+            mp3,
+            "-shortest",
+            "-vf",
+            "scale=720:-2,fps=30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "30",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            out_mp4,
+        ]
+    )
+
 
 def concat_segments(files: list[str], out_mp4: str):
     lst = "concat_" + uuid.uuid4().hex + ".txt"
     with open(lst, "w", encoding="utf-8") as f:
         for p in files:
             f.write(f"file '{p}'\n")
+    sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_mp4])
 
-    # aynı codec ayarlarıyla üretildiği için copy genelde sorunsuz
-    try:
-        sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_mp4])
-    except subprocess.CalledProcessError:
-        # bazen concat copy takılabilir -> reencode fallback
-        sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-            "-c:a", "aac", "-b:a", "128k",
-            out_mp4])
 
 def send_telegram(chat_id: str, video_path: str):
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     url = f"https://api.telegram.org/bot{token}/sendVideo"
-
     with open(video_path, "rb") as f:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": chat_id,
-                "supports_streaming": "true",
-            },
-            files={
-                "video": (os.path.basename(video_path), f, "video/mp4")
-            },
-            timeout=600
-        )
+        r = requests.post(url, data={"chat_id": chat_id}, files={"video": f}, timeout=300)
 
-    print("Telegram status:", r.status_code, flush=True)
-    print("Telegram response:", r.text[:2000], flush=True)
-
+    print("Telegram status:", r.status_code)
+    if r.status_code != 200:
+        print("Telegram response:", r.text[:800])
     r.raise_for_status()
 
 
-
-# --------------------------
-# Main
-# --------------------------
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 render.py payload.json")
-        sys.exit(2)
-
     payload_path = sys.argv[1]
-    with open(payload_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    payload = json.load(open(payload_path, "r", encoding="utf-8"))
 
-    chat_id = str(payload.get("chat_id", "")).strip()
-    prompt = str(payload.get("text", "")).strip()
+    chat_id = str(payload["chat_id"])
+    prompt = str(payload["text"])
 
-    if not chat_id:
-        raise RuntimeError("payload.json içinde chat_id yok")
-    if not prompt:
-        prompt = "Kısa bir Türkçe hikaye"
+    style = str(payload.get("style") or "cinematic").strip()
+    voice = str(payload.get("voice") or "tr-TR-AhmetNeural").strip()
 
-    scenes = gemini_scenes(prompt)
-    print(f"[Scenes] count={len(scenes)}", flush=True)
+    scenes_raw = payload.get("scenes")
+    try:
+        scenes_count = int(scenes_raw) if str(scenes_raw).strip() else 6
+    except Exception:
+        scenes_count = 6
+    scenes_count = max(1, min(12, scenes_count))
+
+    scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style)
+    print(f"[Scenes] count={len(scenes)} style={style} voice={voice}")
 
     segments = []
     for i, sc in enumerate(scenes, start=1):
-        ip = str(sc.get("image_prompt", prompt))
-        nar = str(sc.get("narration", prompt))
+        ip = sc.get("image_prompt", prompt)
+        nar = sc.get("narration", prompt)
 
         img = f"scene_{i}.jpg"
         mp3 = f"scene_{i}.mp3"
@@ -233,7 +191,8 @@ def main():
 
         img_url = POLLINATIONS + urllib.parse.quote(ip, safe="")
         dl(img_url, img)
-        tts_to_mp3(nar, mp3)
+
+        tts_to_mp3(nar, mp3, voice=voice)
         make_segment(img, mp3, mp4)
         segments.append(mp4)
 
