@@ -25,26 +25,33 @@ jobs:
         run: |
           pip3 install --no-cache-dir edge-tts requests
 
-      - name: Write payload (safe JSON)
+      - name: Write payload
         env:
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           TEXT: ${{ github.event.client_payload.text }}
+          STYLE: ${{ github.event.client_payload.style }}
+          SCENES: ${{ github.event.client_payload.scenes }}
+          VOICE: ${{ github.event.client_payload.voice }}
         run: |
           jq -n \
             --arg chat_id "$CHAT_ID" \
             --arg text "$TEXT" \
-            '{chat_id:$chat_id, text:$text}' > payload.json
+            --arg style "$STYLE" \
+            --arg voice "$VOICE" \
+            --arg scenes "$SCENES" \
+            '{
+              chat_id: $chat_id,
+              text: $text,
+              style: ($style // ""),
+              scenes: ($scenes // ""),
+              voice: ($voice // "")
+            }' > payload.json
 
-          echo "payload.json:"
           cat payload.json
 
       - name: Render & send to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # İstersen değiştirebilirsin:
-          GEMINI_MODEL: gemini-2.5-flash
         run: |
           python3 render.py payload.json
-
-
