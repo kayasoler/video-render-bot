@@ -27,13 +27,16 @@ jobs:
 
       - name: Write payload
         env:
-          CHAT_ID:  ${{ github.event.client_payload.chat_id }}
-          TEXT:     ${{ github.event.client_payload.text }}
-          STYLE:    ${{ github.event.client_payload.style }}
-          SCENES:   ${{ github.event.client_payload.scenes }}
-          VOICE:    ${{ github.event.client_payload.voice }}
-          RATIO:    ${{ github.event.client_payload.ratio }}
-          CAPTION:  ${{ github.event.client_payload.caption }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          TEXT: ${{ github.event.client_payload.text }}
+          STYLE: ${{ github.event.client_payload.style }}
+          SCENES: ${{ github.event.client_payload.scenes }}
+          VOICE: ${{ github.event.client_payload.voice }}
+          RATIO: ${{ github.event.client_payload.ratio }}
+          MODEL: ${{ github.event.client_payload.model }}
+          ENHANCE: ${{ github.event.client_payload.enhance }}
+          SEED: ${{ github.event.client_payload.seed }}
+          CAPTION: ${{ github.event.client_payload.caption }}
         run: |
           jq -n \
             --arg chat_id "$CHAT_ID" \
@@ -42,6 +45,9 @@ jobs:
             --arg voice "$VOICE" \
             --arg scenes "$SCENES" \
             --arg ratio "$RATIO" \
+            --arg model "$MODEL" \
+            --arg enhance "$ENHANCE" \
+            --arg seed "$SEED" \
             --arg caption "$CAPTION" \
             '{
               chat_id: $chat_id,
@@ -50,6 +56,9 @@ jobs:
               scenes: ($scenes // ""),
               voice: ($voice // ""),
               ratio: ($ratio // ""),
+              model: ($model // ""),
+              enhance: ($enhance // ""),
+              seed: ($seed // ""),
               caption: ($caption // "")
             }' > payload.json
 
