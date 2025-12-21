@@ -18,16 +18,14 @@ def sh(cmd: list[str]):
 
 
 def dl(url: str, path: str):
-    r = requests.get(url, timeout=120)
+    r = requests.get(url, timeout=180)
     r.raise_for_status()
     with open(path, "wb") as f:
         f.write(r.content)
 
 
 def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: int = 6):
-    """
-    429 gelirse exponential backoff ile tekrar dener.
-    """
+    """429 gelirse exponential backoff ile tekrar dener."""
     for attempt in range(max_retries):
         resp = requests.post(url, json=json_body, timeout=timeout)
 
@@ -49,38 +47,62 @@ def post_with_retry(url: str, json_body: dict, timeout: int = 120, max_retries: 
 
 
 def gemini_scenes(prompt: str, scenes_count: int, style: str):
+    """
+    Gemini -> JSON sahneler:
+    {"scenes":[{"image_prompt":"(EN) ...","narration":"(TR) ...","duration":6}]}
+    """
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        # Key yoksa fallback: aynı prompttan sahneler üret
+        # Key yoksa fallback (daha zayıf)
         scenes = []
         for i in range(scenes_count):
             scenes.append(
                 {
-                    "image_prompt": f"{style} style. {prompt}. Scene {i+1}/{scenes_count}.",
+                    "image_prompt": f"{style} cinematic film still. {prompt}. Scene {i+1}/{scenes_count}. "
+                                   f"Highly detailed, consistent characters. Avoid: text, watermark, logo.",
                     "narration": prompt,
                     "duration": 6,
                 }
             )
         return scenes
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
-    system = (
-        f"Aşağıdaki kullanıcı isteğinden {scenes_count} sahnelik kısa bir video planı üret.\n"
-        f"Genel görsel stil: {style}\n"
-        "SADECE şu JSON formatında dön (başka hiçbir şey yazma):\n"
-        '{"scenes":[{"image_prompt":"...","narration":"...","duration":6}]}\n'
-        "Türkçe yaz. image_prompt görsel üretim için net ve betimleyici olsun.\n"
-        "Her sahne için duration 4-8 saniye arası olabilir."
-    )
+    # Karakter tutarlılığı için "character bible" yaklaşımı:
+    system = f"""
+You are a storyboard generator.
 
-    body = {
-        "contents": [
-            {"role": "user", "parts": [{"text": system + "\n\nKULLANICI:\n" + prompt}]}
-        ]
-    }
+TASK:
+Given a Turkish user request, create a short video plan of exactly {scenes_count} scenes.
 
-    resp = post_with_retry(url, json_body=body, timeout=120, max_retries=6)
+STYLE:
+Overall visual style = {style}. Use cinematic film language (lighting, lens, composition).
+
+OUTPUT FORMAT:
+Return ONLY valid JSON, no markdown, no extra text:
+{{
+  "scenes": [
+    {{
+      "image_prompt": "...",   // ENGLISH. Very descriptive. Include character consistency details.
+      "narration": "...",      // TURKISH. Natural narration for this scene.
+      "duration": 6            // integer 4-8
+    }}
+  ]
+}}
+
+QUALITY RULES:
+- Maintain the same main characters across scenes (appearance, clothing, names).
+- Each image_prompt must specify: setting, time of day, lighting, camera vibe (film still), main characters, action, mood.
+- Add an "Avoid:" clause at the end: "Avoid: text, watermark, logo, deformed anatomy, extra limbs, blurry faces".
+- Keep prompts safe and family-friendly.
+- Scenes must form a coherent story arc (start -> development -> twist/issue -> resolution).
+
+USER REQUEST (Turkish):
+{prompt}
+""".strip()
+
+    body = {"contents": [{"role": "user", "parts": [{"text": system}]}]}
+    resp = post_with_retry(url, json_body=body, timeout=180, max_retries=6)
     txt = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
     txt = txt.strip()
@@ -88,18 +110,29 @@ def gemini_scenes(prompt: str, scenes_count: int, style: str):
         txt = txt.replace("```json", "").replace("```", "").strip()
 
     data = json.loads(txt)
-    scenes = data["scenes"]
+    scenes = data.get("scenes", [])
 
+    # Güvenlik: adet tutmazsa kırp/doldur
     if len(scenes) > scenes_count:
         scenes = scenes[:scenes_count]
     while len(scenes) < scenes_count:
         scenes.append(
             {
-                "image_prompt": f"{style} style. {prompt}. Extra scene.",
+                "image_prompt": f"{style} cinematic film still. {prompt}. Extra scene. "
+                                f"Avoid: text, watermark, logo, deformed anatomy, extra limbs.",
                 "narration": prompt,
                 "duration": 6,
             }
         )
+
+    # duration clamp
+    for s in scenes:
+        try:
+            d = int(s.get("duration", 6))
+        except Exception:
+            d = 6
+        s["duration"] = max(4, min(8, d))
+
     return scenes
 
 
@@ -107,30 +140,23 @@ def tts_to_mp3(text: str, out_mp3: str, voice: str):
     sh(["edge-tts", "--voice", voice, "--text", text, "--write-media", out_mp3])
 
 
-def parse_ratio(ratio: str):
-    """
-    ratio: '1x1' | '9x16' | '16x9'
-    Çıkış çözünürlüğü:
-      - 1x1  -> 720x720
-      - 9x16 -> 720x1280
-      - 16x9 -> 1280x720
-    """
-    ratio = (ratio or "1x1").strip().lower()
-    if ratio in ("1:1", "1x1", "square"):
-        return 720, 720, "1x1"
-    if ratio in ("9:16", "9x16", "vertical", "portrait"):
-        return 720, 1280, "9x16"
-    if ratio in ("16:9", "16x9", "horizontal", "landscape"):
-        return 1280, 720, "16x9"
-    # default
-    return 720, 720, "1x1"
+def ratio_to_dims(ratio: str):
+    r = (ratio or "1x1").strip().lower()
+    if r == "9x16":
+        return 720, 1280
+    if r == "16x9":
+        return 1280, 720
+    return 720, 720  # 1x1 default
 
 
-def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
-    """
-    Görseli hedef oranı dolduracak şekilde scale+crop yapar.
-    """
-    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30"
+def make_segment(img: str, mp3: str, out_mp4: str, out_w: int, out_h: int):
+    # Oranı bozma -> scale + pad
+    vf = (
+        f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+        f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,"
+        f"fps=30,format=yuv420p"
+    )
+
     sh(
         [
             "ffmpeg",
@@ -150,8 +176,6 @@ def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
             "veryfast",
             "-crf",
             "30",
-            "-pix_fmt",
-            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -163,11 +187,8 @@ def make_segment(img: str, mp3: str, out_mp4: str, w: int, h: int):
     )
 
 
-def concat_segments(files: list[str], out_mp4: str, w: int, h: int):
-    """
-    Önce concat demuxer listesi oluşturur, sonra TEK DOSYADA yeniden encode eder.
-    Böylece 'Non-monotonic DTS' gibi audio timestamp sorunları büyük ölçüde biter.
-    """
+def concat_segments_reencode(files: list[str], out_mp4: str):
+    # Re-encode concat -> DTS problemlerini azaltır
     lst = "concat_" + uuid.uuid4().hex + ".txt"
     with open(lst, "w", encoding="utf-8") as f:
         for p in files:
@@ -188,9 +209,7 @@ def concat_segments(files: list[str], out_mp4: str, w: int, h: int):
             "-preset",
             "veryfast",
             "-crf",
-            "28",
-            "-pix_fmt",
-            "yuv420p",
+            "30",
             "-c:a",
             "aac",
             "-b:a",
@@ -205,14 +224,10 @@ def concat_segments(files: list[str], out_mp4: str, w: int, h: int):
 def send_telegram(chat_id: str, video_path: str, caption: str = ""):
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     url = f"https://api.telegram.org/bot{token}/sendVideo"
-
-    data = {"chat_id": chat_id}
-    caption = (caption or "").strip()
-    if caption:
-        # Telegram caption max 1024; güvenli kırp
-        data["caption"] = caption[:1024]
-
     with open(video_path, "rb") as f:
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption
         r = requests.post(url, data=data, files={"video": f}, timeout=300)
 
     print("Telegram status:", r.status_code)
@@ -230,6 +245,16 @@ def main():
 
     style = str(payload.get("style") or "cinematic").strip()
     voice = str(payload.get("voice") or "tr-TR-AhmetNeural").strip()
+    ratio = str(payload.get("ratio") or "1x1").strip()
+
+    # Pollinations params
+    model = str(payload.get("model") or "flux").strip()  # ör: flux, flux-realism, flux-anime
+    enhance = str(payload.get("enhance") or "true").strip().lower()  # true/false
+    seed_raw = payload.get("seed")
+    try:
+        seed = int(seed_raw) if str(seed_raw).strip() else random.randint(1, 10**9)
+    except Exception:
+        seed = random.randint(1, 10**9)
 
     scenes_raw = payload.get("scenes")
     try:
@@ -238,13 +263,10 @@ def main():
         scenes_count = 6
     scenes_count = max(1, min(12, scenes_count))
 
-    ratio = str(payload.get("ratio") or "1x1").strip()
-    w, h, ratio_norm = parse_ratio(ratio)
-
-    caption = str(payload.get("caption") or "").strip()
+    out_w, out_h = ratio_to_dims(ratio)
 
     scenes = gemini_scenes(prompt, scenes_count=scenes_count, style=style)
-    print(f"[Scenes] count={len(scenes)} style={style} voice={voice} ratio={ratio_norm} size={w}x{h}")
+    print(f"[Scenes] count={len(scenes)} style={style} voice={voice} ratio={ratio} model={model} seed={seed} enhance={enhance}")
 
     segments = []
     for i, sc in enumerate(scenes, start=1):
@@ -255,19 +277,28 @@ def main():
         mp3 = f"scene_{i}.mp3"
         mp4 = f"seg_{i}.mp4"
 
-        # Oranı ipucu olarak prompt'a eklemek istersen (isteğe bağlı)
-        # ip2 = f"{ip} -- aspect ratio {ratio_norm}"
-        ip2 = ip
-
-        img_url = POLLINATIONS + urllib.parse.quote(ip2, safe="")
+        # Pollinations URL with params :contentReference[oaicite:3]{index=3}
+        q = {
+            "width": out_w,
+            "height": out_h,
+            "model": model,
+            "seed": seed + i,        # sahneler birbirinden ayrı ama deterministik
+            "enhance": "true" if enhance == "true" else "false",
+            "nologo": "true",
+            "private": "true",
+            "safe": "true",
+        }
+        img_url = POLLINATIONS + urllib.parse.quote(ip, safe="") + "?" + urllib.parse.urlencode(q)
         dl(img_url, img)
 
         tts_to_mp3(nar, mp3, voice=voice)
-        make_segment(img, mp3, mp4, w=w, h=h)
+        make_segment(img, mp3, mp4, out_w, out_h)
         segments.append(mp4)
 
     out = "final.mp4"
-    concat_segments(segments, out, w=w, h=h)
+    concat_segments_reencode(segments, out)
+
+    caption = str(payload.get("caption") or "").strip()
     send_telegram(chat_id, out, caption=caption)
 
 
